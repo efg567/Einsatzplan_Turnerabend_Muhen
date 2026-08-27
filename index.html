@@ -58,6 +58,7 @@ tr:hover td{background:#FAFAF3;}
 input,select,textarea{font-family:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:#fff;color:var(--ink);}
 textarea{font-family:ui-monospace,monospace;resize:vertical;}
 input:focus,select:focus{outline:2px solid var(--accent);outline-offset:1px;}
+input[type=checkbox]{width:auto;padding:0;accent-color:var(--primary);}
 button{font-family:'Inter',sans-serif;font-size:13px;font-weight:600;padding:7px 12px;border-radius:6px;border:1px solid var(--primary);background:var(--primary);color:#fff;cursor:pointer;}
 button.secondary{background:#fff;color:var(--primary);}
 button.ghost{background:transparent;color:var(--primary);border-color:var(--border);}
@@ -100,6 +101,14 @@ canvas{max-width:100%;}
 .legend-swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;}
 ::-webkit-scrollbar{height:8px;}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px;}
+@media print{
+  nav.tabs, #statusBar, header.top .right, .no-print, .taetigkeit-card button, .slot-row button, .close-x{display:none !important;}
+  body{background:#fff;}
+  .panel{box-shadow:none;border:1px solid #ccc;break-inside:avoid;}
+  main{max-width:100%;padding:0 6px;}
+  header.top{background:#fff;color:var(--ink);}
+  h1{color:var(--primary);}
+}
 </style>
 </head>
 <body>
@@ -137,6 +146,7 @@ const K_ME = 'turnerabend_mein_mitglied_id';
 
 let STAMM = null, EINSAETZE = [], ADMIN = false, MEIN_ID = null, TAB = 'stamm';
 let ACTIVE_TERMIN = null;
+let NUR_MEINE = false, PLAN_VEREIN_FILTER = '';
 let CHARTS = {};
 let db = null, dataDocRef = null, CONNECTED = false, FIREBASE_ERROR = null;
 
@@ -177,8 +187,15 @@ function defaultStamm(){
       {id:uid('ter'),name:'Showabend 2',datum:'2026-11-14'},
       {id:uid('ter'),name:'Aufräumen',datum:'2026-11-15'}
     ],
-    taetigkeiten:[]
+    taetigkeiten:[],
+    dienstleister:[],
+    dienstleisterEinsaetze:[]
   };
+}
+function normalizeStamm(){
+  if(!STAMM.dienstleister) STAMM.dienstleister = [];
+  if(!STAMM.dienstleisterEinsaetze) STAMM.dienstleisterEinsaetze = [];
+  (STAMM.taetigkeiten||[]).forEach(t=>{ if(t.ueberMitternacht===undefined) t.ueberMitternacht=false; });
 }
 
 /* ============================= FIREBASE-ANBINDUNG ============================= */
@@ -199,6 +216,7 @@ function initFirebase(){
         } else {
           STAMM = defaultStamm(); EINSAETZE = [];
         }
+        normalizeStamm();
         CONNECTED = true; FIREBASE_ERROR = null;
         render();
       },
@@ -260,15 +278,28 @@ function sortedTermine(){ return [...STAMM.termine].sort((a,b)=> a.datum.localeC
 function taetigkeitenFor(terminId){ return STAMM.taetigkeiten.filter(t=>t.terminId===terminId).sort((a,b)=> toMin(a.von)-toMin(b.von)); }
 function slotsFor(tId, vId){ return EINSAETZE.filter(s=>s.taetigkeitId===tId && (vId===undefined || s.vereinId===vId)); }
 
+function taetigkeitDauer(tk){
+  const v=toMin(tk.von), b=toMin(tk.bis);
+  if(tk.ueberMitternacht) return ((b - v + 1440) % 1440) || 1440;
+  return Math.max(0, b - v);
+}
+function taetigkeitZeitraumAbs(tk){
+  const t = termin(tk.terminId);
+  const baseDay = t ? new Date(t.datum+'T00:00:00').getTime() : 0;
+  const start = baseDay + toMin(tk.von)*60000;
+  let end = baseDay + toMin(tk.bis)*60000;
+  if(tk.ueberMitternacht || end<=start) end += 24*60*60000;
+  return {start, end};
+}
+
 function hasConflict(mitgliedId, taet, excludeSlotId){
-  const dag = termin(taet.terminId)?.datum;
+  const {start:s1, end:e1} = taetigkeitZeitraumAbs(taet);
   const meine = EINSAETZE.filter(s=>s.mitgliedId===mitgliedId && s.id!==excludeSlotId);
   for(const s of meine){
     const t2 = taetigkeit(s.taetigkeitId);
     if(!t2 || t2.id===taet.id) continue;
-    const dag2 = termin(t2.terminId)?.datum;
-    if(dag2!==dag) continue;
-    if(toMin(taet.von) < toMin(t2.bis) && toMin(t2.von) < toMin(taet.bis)) return t2;
+    const {start:s2, end:e2} = taetigkeitZeitraumAbs(t2);
+    if(s1 < e2 && s2 < e1) return t2;
   }
   return null;
 }
@@ -372,6 +403,12 @@ async function changeAdminPassword(){
 
 /* ============================= RENDER SHELL ============================= */
 function setTab(t){ TAB=t; render(); }
+function headerBesetzungsgradSuffix(){
+  if(!STAMM.taetigkeiten.length) return '';
+  const stats = computeStats();
+  if(!stats.totalSlots) return '';
+  return ' · ' + Math.round(stats.filledSlots/stats.totalSlots*100) + '% besetzt';
+}
 
 function render(){
   const nav = document.getElementById('tabs');
@@ -401,7 +438,7 @@ function render(){
     return;
   }
 
-  document.getElementById('headerSub').textContent = STAMM.vereine.map(v=>v.name).join(' · ') + ' — ' + STAMM.termine.length + ' Termine, ' + STAMM.taetigkeiten.length + ' Tätigkeiten';
+  document.getElementById('headerSub').textContent = STAMM.vereine.map(v=>v.name).join(' · ') + ' — ' + STAMM.termine.length + ' Termine, ' + STAMM.taetigkeiten.length + ' Tätigkeiten' + headerBesetzungsgradSuffix();
   document.querySelectorAll('#tabs button').forEach(b=> b.classList.toggle('active', b.dataset.tab===TAB));
   const at = document.getElementById('adminToggle');
   at.classList.toggle('on', ADMIN);
@@ -462,7 +499,7 @@ function renderStamm(){
     html += `</tr>`;
   });
   html += `</tbody></table>`;
-  if(ADMIN) html += `<div class="form-inline"><div><label>Neuer Verein</label><input id="newVereinName" placeholder="z.B. STV"></div><button onclick="addVerein()">+ Hinzufügen</button></div>`;
+  if(ADMIN) html += `<div class="form-inline"><div><label>Neuer Verein</label><input id="newVereinName" placeholder="z.B. STV" onkeydown="if(event.key==='Enter'){event.preventDefault();addVerein();}"></div><button onclick="addVerein()">+ Hinzufügen</button></div>`;
   html += `</div>`;
 
   // Bereiche
@@ -481,15 +518,34 @@ function renderStamm(){
     html += `</tr>`;
   });
   html += `</tbody></table>`;
-  if(ADMIN) html += `<div class="form-inline"><div><label>Neuer Bereich</label><input id="newBereichName" placeholder="z.B. Küche"></div><button onclick="addBereich()">+ Hinzufügen</button></div>`;
+  if(ADMIN) html += `<div class="form-inline"><div><label>Neuer Bereich</label><input id="newBereichName" placeholder="z.B. Küche" onkeydown="if(event.key==='Enter'){event.preventDefault();addBereich();}"></div><button onclick="addBereich()">+ Hinzufügen</button></div>`;
   html += `</div></div>`;
+
+  // Dienstleister
+  if(ADMIN || STAMM.dienstleister.length){
+    html += `<div class="panel"><h2>Dienstleister</h2>
+      <div class="small" style="margin-bottom:8px;">Externe Dienstleister wie Sanität oder Sicherheitsdienst. Hier verwaltest du nur die Liste der Anbieter – deren Anwesenheitszeiten trägst du im Reiter "Termine &amp; Tätigkeiten" ein.</div>
+      <table><thead><tr><th>Name</th><th>Kontakt</th>${ADMIN?'<th></th>':''}</tr></thead><tbody>`;
+    STAMM.dienstleister.forEach(d=>{
+      html += `<tr><td><b>${esc(d.name)}</b></td><td>${esc(d.kontakt||'')}</td>`;
+      if(ADMIN) html += `<td><button class="close-x" onclick="delDienstleister('${d.id}')" title="Löschen">✕</button></td>`;
+      html += `</tr>`;
+    });
+    if(!STAMM.dienstleister.length) html += `<tr><td colspan="3" class="small">Noch keine Dienstleister erfasst.</td></tr>`;
+    html += `</tbody></table>`;
+    if(ADMIN) html += `<div class="form-inline">
+      <div><label>Name</label><input id="newDienstleisterName" placeholder="z.B. Sanität" onkeydown="if(event.key==='Enter'){event.preventDefault();addDienstleister();}"></div>
+      <div><label>Kontakt (optional)</label><input id="newDienstleisterKontakt" placeholder="Telefon/E-Mail" onkeydown="if(event.key==='Enter'){event.preventDefault();addDienstleister();}"></div>
+      <button onclick="addDienstleister()">+ Hinzufügen</button></div>`;
+    html += `</div>`;
+  }
 
   // Mitglieder
   html += `<div class="panel"><h2>Mitglieder</h2><table><thead><tr><th>Name</th><th>Verein</th><th>Einsätze</th><th>Std.</th>${ADMIN?'<th></th>':''}</tr></thead><tbody>`;
   if(!STAMM.mitglieder.length) html += `<tr><td colspan="5" class="small">Noch keine Mitglieder erfasst.</td></tr>`;
   [...STAMM.mitglieder].sort((a,b)=>a.name.localeCompare(b.name)).forEach(m=>{
     const anz = EINSAETZE.filter(s=>s.mitgliedId===m.id).length;
-    const min = EINSAETZE.filter(s=>s.mitgliedId===m.id).reduce((sum,s)=>{const t=taetigkeit(s.taetigkeitId); return sum+(t? toMin(t.bis)-toMin(t.von):0);},0);
+    const min = EINSAETZE.filter(s=>s.mitgliedId===m.id).reduce((sum,s)=>{const t=taetigkeit(s.taetigkeitId); return sum+(t? taetigkeitDauer(t):0);},0);
     html += `<tr><td>${esc(m.name)}</td><td><span class="pill" style="background:${vereinColor(m.vereinId)}">${esc(verein(m.vereinId)?.name||'?')}</span></td><td>${anz}</td><td>${fmtH(min)}</td>`;
     if(ADMIN) html += `<td><button class="close-x" onclick="delMitglied('${m.id}')" title="Löschen">✕</button></td>`;
     html += `</tr>`;
@@ -497,7 +553,7 @@ function renderStamm(){
   html += `</tbody></table>`;
   if(ADMIN){
     html += `<div class="form-inline">
-      <div><label>Name</label><input id="newMitgliedName" placeholder="Vor- und Nachname"></div>
+      <div><label>Name</label><input id="newMitgliedName" placeholder="Vor- und Nachname" onkeydown="if(event.key==='Enter'){event.preventDefault();addMitglied();}"></div>
       <div><label>Verein</label><select id="newMitgliedVerein">${STAMM.vereine.map(v=>`<option value="${v.id}">${esc(v.name)}</option>`).join('')}</select></div>
       <button onclick="addMitglied()">+ Hinzufügen</button>
     </div>
@@ -561,6 +617,7 @@ function handleRestoreFile(ev){
       if(!data.stammdaten || !data.einsaetze){ toast('Ungültige Backup-Datei'); return; }
       if(!confirm('Aktuelle Daten werden durch die Backup-Datei ersetzt. Fortfahren?')) return;
       STAMM = data.stammdaten; EINSAETZE = data.einsaetze;
+      normalizeStamm();
       await saveStamm(); await saveSlots();
       toast('Backup wiederhergestellt'); render();
     }catch(e){ toast('Datei konnte nicht gelesen werden'); }
@@ -585,6 +642,18 @@ function delMitglied(id){ if(!confirm('Mitglied wirklich löschen? Alle Einsätz
   STAMM.bereiche.forEach(b=>{ if(b.verantwortlichId===id) b.verantwortlichId=null; });
   EINSAETZE.forEach(s=>{ if(s.mitgliedId===id) s.mitgliedId=null; });
   applyStammChange(); }
+function addDienstleister(){
+  const inp=document.getElementById('newDienstleisterName'); const kInp=document.getElementById('newDienstleisterKontakt');
+  const name=inp.value.trim(); if(!name) return;
+  STAMM.dienstleister.push({id:uid('dl'), name, kontakt:(kInp.value||'').trim()});
+  inp.value=''; if(kInp) kInp.value=''; applyStammChange();
+}
+function delDienstleister(id){
+  if(STAMM.dienstleisterEinsaetze.some(e=>e.dienstleisterId===id)){ toast('Dienstleister hat noch Einsätze – zuerst entfernen'); return; }
+  if(!confirm('Dienstleister wirklich löschen?')) return;
+  STAMM.dienstleister = STAMM.dienstleister.filter(d=>d.id!==id);
+  applyStammChange();
+}
 
 /* ============================= TAB 2: TERMINE & TÄTIGKEITEN ============================= */
 function renderTaetig(){
@@ -599,18 +668,35 @@ function renderTaetig(){
   });
   html += `</tbody></table>`;
   if(ADMIN) html += `<div class="form-inline">
-    <div><label>Datum</label><input type="date" id="newTerminDatum"></div>
-    <div><label>Bezeichnung</label><input id="newTerminName" placeholder="z.B. Vorprobe"></div>
+    <div><label>Datum</label><input type="date" id="newTerminDatum" onkeydown="if(event.key==='Enter'){event.preventDefault();addTermin();}"></div>
+    <div><label>Bezeichnung</label><input id="newTerminName" placeholder="z.B. Vorprobe" onkeydown="if(event.key==='Enter'){event.preventDefault();addTermin();}"></div>
     <button onclick="addTermin()">+ Termin hinzufügen</button></div>`;
   html += `</div>`;
 
-  html += `<div class="panel"><h2>Tätigkeiten</h2><div class="small" style="margin-bottom:8px;">Tätigkeiten werden automatisch chronologisch nach Termin und Uhrzeit einsortiert.</div>`;
+  html += `<div class="panel"><h2>Tätigkeiten</h2><div class="small" style="margin-bottom:8px;">Tätigkeiten werden automatisch chronologisch nach Termin und Uhrzeit einsortiert. Einsätze über Mitternacht sind mit „+1 Tag" gekennzeichnet.</div>`;
   sortedTermine().forEach(t=>{
     const tks = taetigkeitenFor(t.id);
     html += `<h3 style="margin-top:16px;">${fmtDatum(t.datum)} — ${esc(t.name)}</h3>`;
     if(!tks.length) html += `<div class="small">Keine Tätigkeiten erfasst.</div>`;
     tks.forEach(tk=> html += renderTaetigkeitAdminCard(tk));
     if(ADMIN) html += renderNewTaetigkeitForm(t.id);
+
+    const dlEinsaetze = STAMM.dienstleisterEinsaetze.filter(e=>e.terminId===t.id);
+    if(dlEinsaetze.length || (ADMIN && STAMM.dienstleister.length)){
+      html += `<h3 style="margin-top:14px;">Dienstleister an diesem Termin</h3>`;
+      if(!dlEinsaetze.length) html += `<div class="small">Keine Dienstleister-Einsätze erfasst.</div>`;
+      dlEinsaetze.forEach(e=>{
+        const d = STAMM.dienstleister.find(x=>x.id===e.dienstleisterId);
+        html += `<div class="taetigkeit-card" style="background:#F3F1E8;">
+          <div class="head"><span class="name">🚑 ${esc(d?.name||'?')} ${e.bemerkung? '<span class="small">— '+esc(e.bemerkung)+'</span>':''}</span>
+          <span class="time">${e.von}–${e.bis} Uhr${e.ueberMitternacht?' <span class="badge muted">+1 Tag</span>':''}</span></div>`;
+        if(ADMIN) html += `<div class="row" style="margin-top:6px;"><button class="close-x" onclick="delDienstleisterEinsatz('${e.id}')" title="Löschen">✕</button></div>`;
+        html += `</div>`;
+      });
+      if(ADMIN && STAMM.dienstleister.length) html += renderNewDienstleisterEinsatzForm(t.id);
+    } else if(ADMIN && !STAMM.dienstleister.length){
+      html += `<div class="small" style="margin-top:10px;">Lege im Reiter "Vereine &amp; Mitglieder" zuerst einen Dienstleister an, um hier dessen Anwesenheit einzutragen.</div>`;
+    }
   });
   html += `</div>`;
   return html;
@@ -622,7 +708,7 @@ function renderTaetigkeitAdminCard(tk){
   let html = `<div class="taetigkeit-card">
     <div class="head">
       <span class="name">${esc(tk.name)} <span class="small">— ${esc(ber?.name||'?')}${ber?.verantwortlichId? ' (Verantw.: '+esc(mitglied(ber.verantwortlichId)?.name||'')+')':''}</span></span>
-      <span class="time">${tk.von}–${tk.bis} Uhr</span>
+      <span class="time">${tk.von}–${tk.bis} Uhr${tk.ueberMitternacht?' <span class="badge muted">+1 Tag</span>':''} <span class="small">(${fmtH(taetigkeitDauer(tk))})</span></span>
     </div>`;
   STAMM.vereine.forEach(v=>{
     const bedarf = (tk.bedarf && tk.bedarf[v.id]) || 0;
@@ -639,22 +725,55 @@ function renderTaetigkeitAdminCard(tk){
     });
     html += `</div>`;
   });
-  if(ADMIN) html += `<div class="row" style="margin-top:10px;"><button class="secondary" onclick="editTaetigkeit('${tk.id}')">Bearbeiten</button><button class="danger" onclick="delTaetigkeit('${tk.id}')">Löschen</button></div>`;
+  if(ADMIN){
+    const zielOptionen = STAMM.termine.filter(te=>te.id!==tk.terminId);
+    html += `<div class="row" style="margin-top:10px;">`;
+    if(zielOptionen.length){
+      html += `<select id="copyTarget_${tk.id}">${zielOptionen.map(te=>`<option value="${te.id}">${esc(te.name)} (${fmtDatum(te.datum)})</option>`).join('')}</select>
+      <button class="secondary" onclick="copyTaetigkeit('${tk.id}')">⧉ Kopieren</button>`;
+    }
+    html += `<button class="secondary" onclick="editTaetigkeit('${tk.id}')">Bearbeiten</button><button class="danger" onclick="delTaetigkeit('${tk.id}')">Löschen</button></div>`;
+  }
   html += `</div>`;
   return html;
 }
 function adminClearSlot(slotId){ const s=EINSAETZE.find(x=>x.id===slotId); if(!s) return; if(s.fixed){ toast('Fixe Zuteilung – bitte in der Tätigkeit anpassen'); return; } s.mitgliedId=null; saveSlots(); render(); }
+function copyTaetigkeit(id){
+  const tk = taetigkeit(id); if(!tk) return;
+  const sel = document.getElementById('copyTarget_'+id);
+  if(!sel || !sel.value){ toast('Kein anderer Termin verfügbar'); return; }
+  const ziel = termin(sel.value);
+  STAMM.taetigkeiten.push({id:uid('tk'), terminId:sel.value, bereichId:tk.bereichId, name:tk.name, von:tk.von, bis:tk.bis, ueberMitternacht:!!tk.ueberMitternacht, bedarf:{...(tk.bedarf||{})}, fixe:[]});
+  applyStammChange();
+  toast('Tätigkeit kopiert nach "'+(ziel?.name||'')+'" (fixe Personen wurden nicht übernommen)');
+}
 
 function renderNewTaetigkeitForm(terminId){
+  const enterHandler = `if(event.key==='Enter'){event.preventDefault();addTaetigkeit('${terminId}');}`;
   return `<div class="taetigkeit-card" style="border-style:dashed;">
     <h3>+ Neue Tätigkeit</h3>
     <div class="form-inline">
       <div><label>Bereich</label><select id="nt_bereich_${terminId}">${STAMM.bereiche.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join('')}</select></div>
-      <div><label>Tätigkeit</label><input id="nt_name_${terminId}" placeholder="z.B. Kasse"></div>
-      <div><label>Von</label><input type="time" id="nt_von_${terminId}"></div>
-      <div><label>Bis</label><input type="time" id="nt_bis_${terminId}"></div>
-      ${STAMM.vereine.map(v=>`<div><label>${esc(v.name)} (Anzahl)</label><input type="number" min="0" value="0" id="nt_bedarf_${terminId}_${v.id}"></div>`).join('')}
+      <div><label>Tätigkeit</label><input id="nt_name_${terminId}" placeholder="z.B. Kasse" onkeydown="${enterHandler}"></div>
+      <div><label>Von</label><input type="time" id="nt_von_${terminId}" onkeydown="${enterHandler}"></div>
+      <div><label>Bis</label><input type="time" id="nt_bis_${terminId}" onkeydown="${enterHandler}"></div>
+      <div><label style="display:flex;align-items:center;gap:5px;white-space:nowrap;"><input type="checkbox" id="nt_mitternacht_${terminId}" style="width:auto;padding:0;"> über Mitternacht</label></div>
+      ${STAMM.vereine.map(v=>`<div><label>${esc(v.name)} (Anzahl)</label><input type="number" min="0" value="0" id="nt_bedarf_${terminId}_${v.id}" onkeydown="${enterHandler}"></div>`).join('')}
       <button onclick="addTaetigkeit('${terminId}')">+ Erstellen</button>
+    </div>
+  </div>`;
+}
+function renderNewDienstleisterEinsatzForm(terminId){
+  const enterHandler = `if(event.key==='Enter'){event.preventDefault();addDienstleisterEinsatz('${terminId}');}`;
+  return `<div class="taetigkeit-card" style="border-style:dashed;">
+    <h3>+ Dienstleister-Einsatz</h3>
+    <div class="form-inline">
+      <div><label>Dienstleister</label><select id="dl_anbieter_${terminId}">${STAMM.dienstleister.map(d=>`<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></div>
+      <div><label>Von</label><input type="time" id="dl_von_${terminId}" onkeydown="${enterHandler}"></div>
+      <div><label>Bis</label><input type="time" id="dl_bis_${terminId}" onkeydown="${enterHandler}"></div>
+      <div><label style="display:flex;align-items:center;gap:5px;white-space:nowrap;"><input type="checkbox" id="dl_mitternacht_${terminId}" style="width:auto;padding:0;"> über Mitternacht</label></div>
+      <div><label>Bemerkung (optional)</label><input id="dl_bemerkung_${terminId}" placeholder="z.B. 2 Personen" onkeydown="${enterHandler}"></div>
+      <button onclick="addDienstleisterEinsatz('${terminId}')">+ Erstellen</button>
     </div>
   </div>`;
 }
@@ -669,11 +788,12 @@ function addTaetigkeit(terminId){
   const name = document.getElementById('nt_name_'+terminId).value.trim();
   const von = document.getElementById('nt_von_'+terminId).value;
   const bis = document.getElementById('nt_bis_'+terminId).value;
+  const ueberMitternacht = document.getElementById('nt_mitternacht_'+terminId).checked;
   if(!name||!von||!bis){ toast('Bitte Tätigkeit, Von und Bis ausfüllen'); return; }
-  if(toMin(bis)<=toMin(von)){ toast('Ende muss nach Beginn liegen'); return; }
+  if(!ueberMitternacht && toMin(bis)<=toMin(von)){ toast('Ende muss nach Beginn liegen (oder „über Mitternacht" aktivieren)'); return; }
   const bedarf = {};
   STAMM.vereine.forEach(v=>{ const val = parseInt(document.getElementById('nt_bedarf_'+terminId+'_'+v.id).value)||0; if(val>0) bedarf[v.id]=val; });
-  STAMM.taetigkeiten.push({id:uid('tk'), terminId, bereichId, name, von, bis, bedarf, fixe:[]});
+  STAMM.taetigkeiten.push({id:uid('tk'), terminId, bereichId, name, von, bis, ueberMitternacht, bedarf, fixe:[]});
   applyStammChange();
 }
 function delTaetigkeit(id){ if(!confirm('Tätigkeit wirklich löschen? Alle zugehörigen Einsätze werden entfernt.')) return;
@@ -684,8 +804,11 @@ function editTaetigkeit(id){
   const name = prompt('Bezeichnung der Tätigkeit:', tk.name); if(name===null) return;
   const von = prompt('Beginn (HH:MM):', tk.von); if(von===null) return;
   const bis = prompt('Ende (HH:MM):', tk.bis); if(bis===null) return;
-  if(toMin(bis)<=toMin(von)){ toast('Ende muss nach Beginn liegen'); return; }
-  tk.name = name.trim()||tk.name; tk.von=von; tk.bis=bis;
+  const mnInput = prompt('Geht der Einsatz über Mitternacht (endet am Folgetag)? (ja/nein)', tk.ueberMitternacht?'ja':'nein');
+  if(mnInput===null) return;
+  const ueberMitternacht = /^j/i.test(mnInput.trim());
+  if(!ueberMitternacht && toMin(bis)<=toMin(von)){ toast('Ende muss nach Beginn liegen (oder über Mitternacht angeben)'); return; }
+  tk.name = name.trim()||tk.name; tk.von=von; tk.bis=bis; tk.ueberMitternacht=ueberMitternacht;
   STAMM.vereine.forEach(v=>{
     const cur = (tk.bedarf&&tk.bedarf[v.id])||0;
     const val = prompt('Benötigte Anzahl '+v.name+':', cur);
@@ -709,12 +832,28 @@ function editFixePersonen(tk){
     ids.forEach(mid=> tk.fixe.push({vereinId:v.id, mitgliedId:mid}));
   });
 }
+function addDienstleisterEinsatz(terminId){
+  const dienstleisterId = document.getElementById('dl_anbieter_'+terminId).value;
+  const von = document.getElementById('dl_von_'+terminId).value;
+  const bis = document.getElementById('dl_bis_'+terminId).value;
+  const ueberMitternacht = document.getElementById('dl_mitternacht_'+terminId).checked;
+  const bemerkung = document.getElementById('dl_bemerkung_'+terminId).value.trim();
+  if(!dienstleisterId||!von||!bis){ toast('Bitte Dienstleister, Von und Bis ausfüllen'); return; }
+  if(!ueberMitternacht && toMin(bis)<=toMin(von)){ toast('Ende muss nach Beginn liegen (oder „über Mitternacht" aktivieren)'); return; }
+  STAMM.dienstleisterEinsaetze.push({id:uid('dle'), terminId, dienstleisterId, von, bis, ueberMitternacht, bemerkung});
+  applyStammChange();
+}
+function delDienstleisterEinsatz(id){
+  if(!confirm('Diesen Dienstleister-Einsatz löschen?')) return;
+  STAMM.dienstleisterEinsaetze = STAMM.dienstleisterEinsaetze.filter(e=>e.id!==id);
+  applyStammChange();
+}
 
 /* ============================= TAB 3: EINSATZPLAN ============================= */
 function renderPlan(){
   const days = sortedTermine();
   if(!ACTIVE_TERMIN && days.length) ACTIVE_TERMIN = days[0].id;
-  let html = `<div class="panel">
+  let html = `<div class="panel no-print">
     <div class="row between">
       <div class="row">
         <label class="small">Ich bin:</label>
@@ -723,11 +862,18 @@ function renderPlan(){
           ${[...STAMM.mitglieder].sort((a,b)=>a.name.localeCompare(b.name)).map(m=>`<option value="${m.id}" ${m.id===MEIN_ID?'selected':''}>${esc(m.name)} (${esc(verein(m.vereinId)?.name||'')})</option>`).join('')}
         </select>
       </div>
-      <label class="small"><input type="checkbox" id="nurMeine" onchange="render()"> Nur meine Einsätze anzeigen</label>
+      <div class="row">
+        <select onchange="setPlanVereinFilter(this.value)">
+          <option value="">Alle Vereine</option>
+          ${STAMM.vereine.map(v=>`<option value="${v.id}" ${v.id===PLAN_VEREIN_FILTER?'selected':''}>${esc(v.name)}</option>`).join('')}
+        </select>
+        <label class="small"><input type="checkbox" id="nurMeine" ${NUR_MEINE?'checked':''} onchange="toggleNurMeine(this.checked)"> Nur meine Einsätze anzeigen</label>
+        <button class="ghost" onclick="window.print()">🖨 Drucken</button>
+      </div>
     </div>
   </div>`;
 
-  html += `<div class="timeline">`;
+  html += `<div class="timeline no-print">`;
   days.forEach(t=>{
     html += `<div class="tl-item ${t.id===ACTIVE_TERMIN?'active':''}" onclick="selectTermin('${t.id}')">
       <div class="day-chip"><div class="d">${new Date(t.datum+'T00:00:00').getDate()}.${new Date(t.datum+'T00:00:00').getMonth()+1}.</div><div class="m">${esc(t.name)}</div></div>
@@ -735,29 +881,53 @@ function renderPlan(){
   });
   html += `</div>`;
 
+  const activeTermin = termin(ACTIVE_TERMIN);
+  if(activeTermin) html += `<h2 style="margin:0 0 10px;">${fmtDatum(activeTermin.datum)} — ${esc(activeTermin.name)}</h2>`;
+
   const tk = ACTIVE_TERMIN ? taetigkeitenFor(ACTIVE_TERMIN) : [];
-  const nurMeine = document.getElementById('nurMeine')?.checked;
   html += `<div class="panel">`;
+  let anyShown = false;
   if(!tk.length) html += `<div class="empty-state">Für diesen Termin sind noch keine Tätigkeiten erfasst.</div>`;
   tk.forEach(t=>{
+    if(PLAN_VEREIN_FILTER){
+      const relevant = ((t.bedarf&&t.bedarf[PLAN_VEREIN_FILTER])>0) || (t.fixe||[]).some(f=>f.vereinId===PLAN_VEREIN_FILTER);
+      if(!relevant) return;
+    }
     const meineSlots = EINSAETZE.filter(s=>s.taetigkeitId===t.id && s.mitgliedId===MEIN_ID);
-    if(nurMeine && !meineSlots.length) return;
-    html += renderTaetigkeitPlanCard(t);
+    if(NUR_MEINE && !meineSlots.length) return;
+    html += renderTaetigkeitPlanCard(t, PLAN_VEREIN_FILTER);
+    anyShown = true;
   });
+  if(tk.length && !anyShown) html += `<div class="empty-state">Keine Tätigkeiten entsprechen dem aktuellen Filter.</div>`;
   html += `</div>`;
+
+  if(!NUR_MEINE){
+    const dlEinsaetze = STAMM.dienstleisterEinsaetze.filter(e=>e.terminId===ACTIVE_TERMIN);
+    if(dlEinsaetze.length){
+      html += `<div class="panel" style="margin-top:16px;background:#F3F1E8;"><h2>Dienstleister</h2>`;
+      dlEinsaetze.forEach(e=>{
+        const d = STAMM.dienstleister.find(x=>x.id===e.dienstleisterId);
+        html += `<div class="slot-row"><span class="name">🚑 ${esc(d?.name||'?')} ${e.bemerkung?'<span class="small">— '+esc(e.bemerkung)+'</span>':''}</span><span class="time small">${e.von}–${e.bis} Uhr${e.ueberMitternacht?' (+1 Tag)':''}</span></div>`;
+      });
+      html += `</div>`;
+    }
+  }
   return html;
 }
 function selectTermin(id){ ACTIVE_TERMIN=id; render(); }
 function setMe(id){ MEIN_ID = id||null; saveMe(); render(); }
+function toggleNurMeine(val){ NUR_MEINE = val; render(); }
+function setPlanVereinFilter(id){ PLAN_VEREIN_FILTER = id; render(); }
 
-function renderTaetigkeitPlanCard(t){
+function renderTaetigkeitPlanCard(t, vereinFilter){
   const ber = bereich(t.bereichId);
   let html = `<div class="taetigkeit-card">
     <div class="head">
       <span class="name">${esc(t.name)} <span class="small">— ${esc(ber?.name||'?')}${ber?.verantwortlichId?' · Verantw.: '+esc(mitglied(ber.verantwortlichId)?.name||''):''}</span></span>
-      <span class="time">${t.von}–${t.bis} Uhr</span>
+      <span class="time">${t.von}–${t.bis} Uhr${t.ueberMitternacht?' <span class="badge muted">+1 Tag</span>':''} <span class="small">(${fmtH(taetigkeitDauer(t))})</span></span>
     </div>`;
   STAMM.vereine.forEach(v=>{
+    if(vereinFilter && v.id!==vereinFilter) return;
     const bedarf = (t.bedarf&&t.bedarf[v.id])||0;
     const hasFix = (t.fixe||[]).some(f=>f.vereinId===v.id);
     if(bedarf<=0 && !hasFix) return;
@@ -772,14 +942,14 @@ function renderTaetigkeitPlanCard(t){
       if(s.fixed){
         // fix, keine Aktion
       } else if(s.mitgliedId){
-        if(ADMIN || s.mitgliedId===MEIN_ID) html += `<button class="ghost" onclick="releaseSlot('${s.id}')">Austragen</button>`;
+        if(ADMIN || s.mitgliedId===MEIN_ID) html += `<button class="ghost no-print" onclick="releaseSlot('${s.id}')">Austragen</button>`;
       } else {
         if(ADMIN){
-          html += `<button class="secondary" onclick="adminAssignPrompt('${s.id}','${v.id}')">Zuweisen</button>`;
+          html += `<button class="secondary no-print" onclick="adminAssignPrompt('${s.id}','${v.id}')">Zuweisen</button>`;
         } else if(MEIN_ID && mitglied(MEIN_ID)?.vereinId===v.id){
-          html += `<button onclick="claimSlot('${s.id}')">Eintragen</button>`;
+          html += `<button class="no-print" onclick="claimSlot('${s.id}')">Eintragen</button>`;
         } else {
-          html += `<span class="small">${MEIN_ID? 'anderer Verein':'wähle dich oben aus'}</span>`;
+          html += `<span class="small no-print">${MEIN_ID? 'anderer Verein':'wähle dich oben aus'}</span>`;
         }
       }
       html += `</div>`;
@@ -819,13 +989,18 @@ async function adminAssignPrompt(slotId, vereinId){
 function computeStats(){
   const perMember = {}; // id -> minutes
   const perVereinPerTermin = {}; // vereinId -> terminId -> minutes
+  const perVereinTotal = {}; // vereinId -> minutes (Summe aller Einsätze)
+  const perVereinSlotCount = {}; // vereinId -> Anzahl besetzter Einsätze
   STAMM.mitglieder.forEach(m=> perMember[m.id]=0);
+  STAMM.vereine.forEach(v=>{ perVereinTotal[v.id]=0; perVereinSlotCount[v.id]=0; });
   EINSAETZE.filter(s=>s.mitgliedId).forEach(s=>{
     const t = taetigkeit(s.taetigkeitId); if(!t) return;
-    const dur = toMin(t.bis)-toMin(t.von);
+    const dur = taetigkeitDauer(t);
     perMember[s.mitgliedId] = (perMember[s.mitgliedId]||0) + dur;
     perVereinPerTermin[s.vereinId] = perVereinPerTermin[s.vereinId] || {};
     perVereinPerTermin[s.vereinId][t.terminId] = (perVereinPerTermin[s.vereinId][t.terminId]||0) + dur;
+    perVereinTotal[s.vereinId] = (perVereinTotal[s.vereinId]||0) + dur;
+    perVereinSlotCount[s.vereinId] = (perVereinSlotCount[s.vereinId]||0) + 1;
   });
   const perVereinAvg = {};
   STAMM.vereine.forEach(v=>{
@@ -835,7 +1010,7 @@ function computeStats(){
   });
   let totalSlots=0, filledSlots=0;
   STAMM.taetigkeiten.forEach(t=>{ STAMM.vereine.forEach(v=>{ const b=(t.bedarf&&t.bedarf[v.id])||0; if(b>0){ totalSlots+=b; filledSlots+=Math.min(b, slotsFor(t.id,v.id).filter(s=>s.mitgliedId).length); } }); });
-  return {perMember, perVereinPerTermin, perVereinAvg, totalSlots, filledSlots};
+  return {perMember, perVereinPerTermin, perVereinTotal, perVereinSlotCount, perVereinAvg, totalSlots, filledSlots};
 }
 
 function renderAuswertung(){
@@ -845,6 +1020,15 @@ function renderAuswertung(){
     <div class="panel"><h3>Mitglieder</h3><h2 style="font-size:26px;">${STAMM.mitglieder.length}</h2><div class="small">über ${STAMM.vereine.length} Vereine</div></div>
     <div class="panel"><h3>Tätigkeiten</h3><h2 style="font-size:26px;">${STAMM.taetigkeiten.length}</h2><div class="small">über ${STAMM.termine.length} Termine</div></div>
   </div>`;
+
+  html += `<div class="panel" style="margin-top:16px;"><h2>Summe pro Verein</h2>
+    <table><thead><tr><th>Verein</th><th>Mitglieder</th><th>Anzahl Einsätze</th><th>Gesamtstunden</th><th>Ø Stunden/Mitglied</th></tr></thead><tbody>`;
+  STAMM.vereine.forEach(v=>{
+    const members = STAMM.mitglieder.filter(m=>m.vereinId===v.id);
+    html += `<tr><td><span class="pill" style="background:${v.color}">${esc(v.name)}</span></td><td>${members.length}</td><td>${stats.perVereinSlotCount[v.id]||0}</td><td>${fmtH(stats.perVereinTotal[v.id]||0)}</td><td>${fmtH(Math.round(stats.perVereinAvg[v.id]||0))}</td></tr>`;
+  });
+  if(!STAMM.vereine.length) html += `<tr><td colspan="5" class="small">Keine Vereine erfasst.</td></tr>`;
+  html += `</tbody></table></div>`;
 
   html += `<div class="grid cols-2" style="margin-top:16px;">
     <div class="panel"><h2>Stunden pro Mitglied</h2><canvas id="chartMember" height="260"></canvas></div>
@@ -906,6 +1090,9 @@ function exportCSV(){
   const stats = computeStats();
   let rows = [['Mitglied','Verein','Stunden']];
   STAMM.mitglieder.forEach(m=> rows.push([m.name, verein(m.vereinId)?.name||'', ((stats.perMember[m.id]||0)/60).toFixed(2)]));
+  rows.push([]);
+  rows.push(['Verein','Anzahl Einsätze','Gesamtstunden']);
+  STAMM.vereine.forEach(v=> rows.push([v.name, stats.perVereinSlotCount[v.id]||0, ((stats.perVereinTotal[v.id]||0)/60).toFixed(2)]));
   const csv = rows.map(r=> r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(';')).join('\n');
   const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
   const link = document.createElement('a');
