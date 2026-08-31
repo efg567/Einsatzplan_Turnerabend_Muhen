@@ -69,7 +69,13 @@ button:hover:not(:disabled){filter:brightness(1.08);}
 .badge{display:inline-block;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600;}
 .badge.ok{background:var(--primary-lighter);color:var(--ok);}
 .badge.warn{background:var(--warn-light);color:var(--warn);}
+.badge.caution{background:var(--accent-light);color:#6B5420;}
 .badge.muted{background:#EFEDE3;color:var(--muted);}
+.status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+.status-dot.ok{background:var(--ok);}
+.status-dot.warn{background:var(--warn);}
+.status-dot.caution{background:var(--accent);}
+.status-dot.muted{background:var(--muted);}
 .small{font-size:12px;color:var(--muted);}
 .day-chip{display:flex;flex-direction:column;align-items:center;background:var(--primary);color:#fff;border-radius:8px;padding:8px 14px;min-width:76px;text-align:center;}
 .day-chip .d{font-family:'Oswald',sans-serif;font-size:18px;}
@@ -787,9 +793,10 @@ function toggleTerminCollapse(id){ if(COLLAPSED_TERMINE.has(id)) COLLAPSED_TERMI
 function expandAllTermine(){ COLLAPSED_TERMINE.clear(); render(); }
 function collapseAllTermine(){ STAMM.termine.forEach(t=>COLLAPSED_TERMINE.add(t.id)); render(); }
 function toggleTaetigkeitCollapse(id){ if(EXPANDED_TAETIGKEITEN.has(id)) EXPANDED_TAETIGKEITEN.delete(id); else EXPANDED_TAETIGKEITEN.add(id); render(); }
-function taetigkeitBesetztSummary(tk){
+function taetigkeitBesetztSummary(tk, vereinFilter){
   let total=0, filled=0;
   STAMM.vereine.forEach(v=>{
+    if(vereinFilter && v.id!==vereinFilter) return;
     if((tk.alle||[]).includes(v.id)){
       const cnt = slotsFor(tk.id, v.id).length;
       total+=cnt; filled+=cnt;
@@ -799,6 +806,12 @@ function taetigkeitBesetztSummary(tk){
     if(b>0){ total+=b; filled+=Math.min(b, slotsFor(tk.id,v.id).filter(s=>s.mitgliedId).length); }
   });
   return {total, filled};
+}
+function statusColorClass(filled, total){
+  if(total<=0) return 'muted';
+  if(filled<=0) return 'warn';
+  if(filled<total) return 'caution';
+  return 'ok';
 }
 function terminBesetztSummary(terminId){
   let total=0, filled=0;
@@ -1140,7 +1153,9 @@ function renderPlan(){
           ${STAMM.vereine.map(v=>`<option value="${v.id}" ${v.id===PLAN_VEREIN_FILTER?'selected':''}>${esc(v.name)}</option>`).join('')}
         </select>
         <label class="small"><input type="checkbox" id="nurMeine" ${NUR_MEINE?'checked':''} onchange="toggleNurMeine(this.checked)"> Nur meine Einsätze anzeigen</label>
-        <button class="ghost" onclick="window.print()">🖨 Drucken</button>
+        <button class="ghost" onclick="expandAllPlanTaetigkeiten()">Alle aufklappen</button>
+        <button class="ghost" onclick="collapseAllPlanTaetigkeiten()">Alle zuklappen</button>
+        <button class="ghost" onclick="printPlan()">🖨 Drucken</button>
       </div>
     </div>
   </div>`;
@@ -1190,12 +1205,36 @@ function selectTermin(id){ ACTIVE_TERMIN=id; render(); }
 function setMe(id){ MEIN_ID = id||null; saveMe(); render(); }
 function toggleNurMeine(val){ NUR_MEINE = val; render(); }
 function setPlanVereinFilter(id){ PLAN_VEREIN_FILTER = id; render(); }
+function expandAllPlanTaetigkeiten(){ (ACTIVE_TERMIN? taetigkeitenFor(ACTIVE_TERMIN):[]).forEach(t=>EXPANDED_TAETIGKEITEN.add(t.id)); render(); }
+function collapseAllPlanTaetigkeiten(){ (ACTIVE_TERMIN? taetigkeitenFor(ACTIVE_TERMIN):[]).forEach(t=>EXPANDED_TAETIGKEITEN.delete(t.id)); render(); }
+function printPlan(){
+  (ACTIVE_TERMIN? taetigkeitenFor(ACTIVE_TERMIN):[]).forEach(t=>EXPANDED_TAETIGKEITEN.add(t.id));
+  render();
+  setTimeout(()=>window.print(), 50);
+}
 
 function renderTaetigkeitPlanCard(t, vereinFilter){
   const ber = bereich(t.bereichId);
+  const expanded = NUR_MEINE || EXPANDED_TAETIGKEITEN.has(t.id);
+  const {total, filled} = taetigkeitBesetztSummary(t, vereinFilter);
+  const statusClass = statusColorClass(filled, total);
+  const meinEinsatz = MEIN_ID && EINSAETZE.some(s=>s.taetigkeitId===t.id && s.mitgliedId===MEIN_ID);
+
+  if(!expanded){
+    return `<div class="tk-compact-row" onclick="toggleTaetigkeitCollapse('${t.id}')">
+      <span class="status-dot ${statusClass}" title="Besetzungsstatus"></span>
+      <span class="chevron">▸</span>
+      <span class="tk-compact-name">${esc(t.name)}</span>
+      <span class="small tk-compact-bereich">${esc(ber?.name||'?')}</span>
+      <span class="time small">${t.von}–${t.bis} Uhr${t.ueberMitternacht?' <span class="badge muted">+1</span>':''}</span>
+      ${total? `<span class="badge ${statusClass}">${filled}/${total}</span>` : ''}
+      ${meinEinsatz? `<span class="badge ok">Mein Einsatz</span>` : ''}
+    </div>`;
+  }
+
   let html = `<div class="taetigkeit-card">
-    <div class="head">
-      <span class="name">${esc(t.name)} <span class="small">— ${esc(ber?.name||'?')}${ber?.verantwortlichId?' · Verantw.: '+esc(mitglied(ber.verantwortlichId)?.name||''):''}</span></span>
+    <div class="head" style="cursor:pointer;" onclick="toggleTaetigkeitCollapse('${t.id}')">
+      <span class="name"><span class="status-dot ${statusClass}"></span> ${esc(t.name)} <span class="small">— ${esc(ber?.name||'?')}${ber?.verantwortlichId?' · Verantw.: '+esc(mitglied(ber.verantwortlichId)?.name||''):''}</span>${meinEinsatz?' <span class="badge ok">Mein Einsatz</span>':''}</span>
       <span class="time">${t.von}–${t.bis} Uhr${t.ueberMitternacht?' <span class="badge muted">+1 Tag</span>':''} <span class="small">(${fmtH(taetigkeitDauer(t))})</span></span>
     </div>`;
   STAMM.vereine.forEach(v=>{
@@ -1238,6 +1277,7 @@ function renderTaetigkeitPlanCard(t, vereinFilter){
     });
     html += `</div>`;
   });
+  html += `</div>`;
   return html;
 }
 async function claimSlot(slotId){
