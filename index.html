@@ -101,6 +101,18 @@ button:hover:not(:disabled){filter:brightness(1.08);}
 .tk-field-checkbox{flex:0 0 160px;}
 .tk-checkbox-label{display:flex;align-items:center;gap:6px;white-space:nowrap;height:32px;box-sizing:border-box;}
 .tk-textarea{width:100%;resize:vertical;min-height:52px;line-height:1.4;}
+.termin-header{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--primary);color:#fff;padding:10px 16px;border-radius:8px;cursor:pointer;margin-top:20px;user-select:none;}
+.termin-header:hover{filter:brightness(1.08);}
+.termin-header-left{display:flex;align-items:center;gap:12px;min-width:0;}
+.termin-date-badge{font-family:'Oswald',sans-serif;font-size:19px;background:rgba(255,255,255,0.16);padding:4px 12px;border-radius:6px;white-space:nowrap;flex-shrink:0;}
+.termin-name-block{min-width:0;}
+.termin-name{font-family:'Oswald',sans-serif;font-size:15.5px;font-weight:600;line-height:1.2;}
+.termin-header-right{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.chevron{font-size:13px;width:16px;text-align:center;opacity:0.85;display:inline-block;}
+.tk-compact-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:#FEFDF9;cursor:pointer;font-size:13px;}
+.tk-compact-row:hover{background:#F5F2E8;}
+.tk-compact-name{font-weight:700;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tk-compact-bereich{flex-shrink:0;color:var(--muted);}
 .close-x{background:transparent;border:none;color:var(--warn);font-size:15px;padding:2px 6px;cursor:pointer;}
 .empty-state{text-align:center;color:var(--muted);padding:30px 10px;}
 .note{background:var(--accent-light);border:1px solid #E8D6A4;border-radius:8px;padding:10px 12px;font-size:12.5px;color:#6B5420;margin-bottom:14px;}
@@ -156,6 +168,7 @@ const K_ME = 'turnerabend_mein_mitglied_id';
 let STAMM = null, EINSAETZE = [], ADMIN = false, MEIN_ID = null, TAB = 'stamm';
 let ACTIVE_TERMIN = null;
 let NUR_MEINE = false, PLAN_VEREIN_FILTER = '';
+let COLLAPSED_TERMINE = new Set(), EXPANDED_TAETIGKEITEN = new Set(), EDITING_TAETIGKEIT = null;
 let CHARTS = {};
 let db = null, dataDocRef = null, CONNECTED = false, FIREBASE_ERROR = null;
 
@@ -716,11 +729,37 @@ function renderTaetig(){
     <button onclick="addTermin()">+ Termin hinzufügen</button></div>`;
   html += `</div>`;
 
-  html += `<div class="panel"><h2>Tätigkeiten</h2><div class="small" style="margin-bottom:8px;">Tätigkeiten werden automatisch chronologisch nach Termin und Uhrzeit einsortiert. Einsätze über Mitternacht sind mit „+1 Tag" gekennzeichnet.</div>`;
+  html += `<div class="panel"><div class="row between">
+      <h2 style="margin:0;">Tätigkeiten</h2>
+      <div class="row">
+        <button class="ghost" onclick="expandAllTermine()">Alle Tage aufklappen</button>
+        <button class="ghost" onclick="collapseAllTermine()">Alle Tage zuklappen</button>
+      </div>
+    </div>
+    <div class="small" style="margin:8px 0 0;">Tätigkeiten werden automatisch chronologisch einsortiert. Klicke auf einen Tag oder eine Tätigkeit, um sie ein- oder auszuklappen.</div>`;
+
   sortedTermine().forEach(t=>{
     const tks = taetigkeitenFor(t.id);
-    html += `<h3 style="margin-top:16px;">${fmtDatum(t.datum)} — ${esc(t.name)}</h3>`;
-    if(!tks.length) html += `<div class="small">Keine Tätigkeiten erfasst.</div>`;
+    const collapsed = COLLAPSED_TERMINE.has(t.id);
+    const {total, filled} = terminBesetztSummary(t.id);
+    const dt = new Date(t.datum+'T00:00:00');
+    html += `<div class="termin-header" onclick="toggleTerminCollapse('${t.id}')">
+      <div class="termin-header-left">
+        <span class="termin-date-badge">${dt.getDate()}.${dt.getMonth()+1}.</span>
+        <div class="termin-name-block">
+          <div class="termin-name">${esc(t.name)}</div>
+          <div class="small" style="color:rgba(255,255,255,0.8);">${dt.toLocaleDateString('de-CH',{weekday:'long'})}</div>
+        </div>
+      </div>
+      <div class="termin-header-right">
+        <span class="badge muted" style="background:rgba(255,255,255,0.18);color:#fff;">${tks.length} Tätigkeiten</span>
+        ${total? `<span class="badge ${filled<total?'warn':'ok'}">${filled}/${total} besetzt</span>` : ''}
+        <span class="chevron">${collapsed?'▸':'▾'}</span>
+      </div>
+    </div>`;
+    if(collapsed) return;
+
+    if(!tks.length) html += `<div class="small" style="margin-top:8px;">Keine Tätigkeiten erfasst.</div>`;
     tks.forEach(tk=> html += renderTaetigkeitAdminCard(tk));
     if(ADMIN) html += renderNewTaetigkeitForm(t.id);
 
@@ -744,15 +783,58 @@ function renderTaetig(){
   html += `</div>`;
   return html;
 }
+function toggleTerminCollapse(id){ if(COLLAPSED_TERMINE.has(id)) COLLAPSED_TERMINE.delete(id); else COLLAPSED_TERMINE.add(id); render(); }
+function expandAllTermine(){ COLLAPSED_TERMINE.clear(); render(); }
+function collapseAllTermine(){ STAMM.termine.forEach(t=>COLLAPSED_TERMINE.add(t.id)); render(); }
+function toggleTaetigkeitCollapse(id){ if(EXPANDED_TAETIGKEITEN.has(id)) EXPANDED_TAETIGKEITEN.delete(id); else EXPANDED_TAETIGKEITEN.add(id); render(); }
+function taetigkeitBesetztSummary(tk){
+  let total=0, filled=0;
+  STAMM.vereine.forEach(v=>{
+    if((tk.alle||[]).includes(v.id)){
+      const cnt = slotsFor(tk.id, v.id).length;
+      total+=cnt; filled+=cnt;
+      return;
+    }
+    const b=(tk.bedarf&&tk.bedarf[v.id])||0;
+    if(b>0){ total+=b; filled+=Math.min(b, slotsFor(tk.id,v.id).filter(s=>s.mitgliedId).length); }
+  });
+  return {total, filled};
+}
+function terminBesetztSummary(terminId){
+  let total=0, filled=0;
+  taetigkeitenFor(terminId).forEach(tk=>{ const s=taetigkeitBesetztSummary(tk); total+=s.total; filled+=s.filled; });
+  return {total, filled};
+}
 function fmtDatum(d){ if(!d) return ''; const dt=new Date(d+'T00:00:00'); return dt.toLocaleDateString('de-CH',{weekday:'short', day:'2-digit', month:'2-digit', year:'numeric'}); }
 
 function renderTaetigkeitAdminCard(tk){
   const ber = bereich(tk.bereichId);
+  const isEditing = EDITING_TAETIGKEIT===tk.id;
+  const expanded = EXPANDED_TAETIGKEITEN.has(tk.id) || isEditing;
+  const {total, filled} = taetigkeitBesetztSummary(tk);
+
+  if(!expanded){
+    return `<div class="tk-compact-row" onclick="toggleTaetigkeitCollapse('${tk.id}')">
+      <span class="chevron">▸</span>
+      <span class="tk-compact-name">${esc(tk.name)}</span>
+      <span class="small tk-compact-bereich">${esc(ber?.name||'?')}</span>
+      <span class="time small">${tk.von}–${tk.bis}${tk.ueberMitternacht?' <span class="badge muted">+1</span>':''}</span>
+      ${total? `<span class="badge ${filled<total?'warn':'ok'}">${filled}/${total}</span>` : ''}
+    </div>`;
+  }
+
   let html = `<div class="taetigkeit-card">
-    <div class="head">
-      <span class="name">${esc(tk.name)} <span class="small">— ${esc(ber?.name||'?')}${ber?.verantwortlichId? ' (Verantw.: '+esc(mitglied(ber.verantwortlichId)?.name||'')+')':''}</span></span>
+    <div class="head" ${isEditing?'':`style="cursor:pointer;" onclick="toggleTaetigkeitCollapse('${tk.id}')"`}>
+      <span class="name">${isEditing?'':'▾ '}${esc(tk.name)} <span class="small">— ${esc(ber?.name||'?')}${ber?.verantwortlichId? ' (Verantw.: '+esc(mitglied(ber.verantwortlichId)?.name||'')+')':''}</span></span>
       <span class="time">${tk.von}–${tk.bis} Uhr${tk.ueberMitternacht?' <span class="badge muted">+1 Tag</span>':''} <span class="small">(${fmtH(taetigkeitDauer(tk))})</span></span>
     </div>`;
+
+  if(isEditing){
+    html += renderEditTaetigkeitForm(tk);
+    html += `</div>`;
+    return html;
+  }
+
   STAMM.vereine.forEach(v=>{
     const istAlle = (tk.alle||[]).includes(v.id);
     const bedarf = (tk.bedarf && tk.bedarf[v.id]) || 0;
@@ -797,7 +879,7 @@ function renderTaetigkeitAdminCard(tk){
       html += `<select id="copyTarget_${tk.id}">${zielOptionen.map(te=>`<option value="${te.id}">${esc(te.name)} (${fmtDatum(te.datum)})</option>`).join('')}</select>
       <button class="secondary" onclick="copyTaetigkeit('${tk.id}')">⧉ Kopieren</button>`;
     }
-    html += `<button class="secondary" onclick="editTaetigkeit('${tk.id}')">Bearbeiten</button><button class="danger" onclick="delTaetigkeit('${tk.id}')">Löschen</button></div>`;
+    html += `<button class="secondary" onclick="startEditTaetigkeit('${tk.id}')">Bearbeiten</button><button class="danger" onclick="delTaetigkeit('${tk.id}')">Löschen</button></div>`;
   }
   html += `</div>`;
   return html;
@@ -830,6 +912,96 @@ function copyTaetigkeit(id){
   STAMM.taetigkeiten.push({id:uid('tk'), terminId:sel.value, bereichId:tk.bereichId, name:tk.name, von:tk.von, bis:tk.bis, ueberMitternacht:!!tk.ueberMitternacht, bedarf:{...(tk.bedarf||{})}, fixe:[], alle:[...(tk.alle||[])], ausnahmen:[], korrektur:{}});
   applyStammChange();
   toast('Tätigkeit kopiert nach "'+(ziel?.name||'')+'" (fixe Personen und Ausnahmen wurden nicht übernommen)');
+}
+
+/* ---- Vollständige Inline-Bearbeitung einer Tätigkeit ---- */
+function startEditTaetigkeit(id){ EDITING_TAETIGKEIT = id; EXPANDED_TAETIGKEITEN.add(id); render(); }
+function cancelEditTaetigkeit(){ EDITING_TAETIGKEIT = null; render(); }
+function toggleAlleCheckboxEdit(tkId, vereinId){
+  const cb = document.getElementById('et_alle_'+tkId+'_'+vereinId);
+  const num = document.getElementById('et_bedarf_'+tkId+'_'+vereinId);
+  if(num) num.disabled = cb.checked;
+}
+function manageFixePersonen(tkId){
+  const tk = taetigkeit(tkId); if(!tk) return;
+  editFixePersonen(tk);
+  applyStammChange();
+}
+function renderEditTaetigkeitForm(tk){
+  const enterHandler = `if(event.key==='Enter'){event.preventDefault();saveEditTaetigkeit('${tk.id}');}`;
+  return `<div class="tk-form-row">
+      <div class="tk-field tk-field-bereich">
+        <label>Bereich</label>
+        <select id="et_bereich_${tk.id}">${STAMM.bereiche.map(b=>`<option value="${b.id}" ${b.id===tk.bereichId?'selected':''}>${esc(b.name)}</option>`).join('')}</select>
+      </div>
+      <div class="tk-field tk-field-time">
+        <label>Von</label>
+        <input type="time" id="et_von_${tk.id}" value="${tk.von}" onkeydown="${enterHandler}">
+      </div>
+      <div class="tk-field tk-field-time">
+        <label>Bis</label>
+        <input type="time" id="et_bis_${tk.id}" value="${tk.bis}" onkeydown="${enterHandler}">
+      </div>
+      <div class="tk-field tk-field-checkbox">
+        <label>&nbsp;</label>
+        <label class="tk-checkbox-label"><input type="checkbox" id="et_mitternacht_${tk.id}" ${tk.ueberMitternacht?'checked':''}> über Mitternacht</label>
+      </div>
+    </div>
+    <div class="tk-field" style="margin-top:10px;">
+      <label>Tätigkeit</label>
+      <textarea class="tk-textarea" rows="2" id="et_name_${tk.id}">${esc(tk.name)}</textarea>
+    </div>
+    <div class="form-inline">
+      ${STAMM.vereine.map(v=>{
+        const istAlle = (tk.alle||[]).includes(v.id);
+        const cur = (tk.bedarf && tk.bedarf[v.id]) || 0;
+        return `<div><label>${esc(v.name)} (Anzahl)</label><input type="number" min="0" value="${cur}" id="et_bedarf_${tk.id}_${v.id}" ${istAlle?'disabled':''} onkeydown="${enterHandler}">
+          <label class="tk-checkbox-label" style="height:auto;margin-top:4px;font-weight:400;"><input type="checkbox" id="et_alle_${tk.id}_${v.id}" ${istAlle?'checked':''} onchange="toggleAlleCheckboxEdit('${tk.id}','${v.id}')"> alle Mitglieder</label>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="row" style="margin-top:10px;justify-content:space-between;">
+      <button class="ghost" onclick="manageFixePersonen('${tk.id}')">Fixe Personen verwalten…</button>
+      <div class="row">
+        <button class="secondary" onclick="cancelEditTaetigkeit()">Abbrechen</button>
+        <button onclick="saveEditTaetigkeit('${tk.id}')">Speichern</button>
+      </div>
+    </div>`;
+}
+function saveEditTaetigkeit(id){
+  const tk = taetigkeit(id); if(!tk) return;
+  const bereichId = document.getElementById('et_bereich_'+id).value;
+  const name = document.getElementById('et_name_'+id).value.trim();
+  const von = document.getElementById('et_von_'+id).value;
+  const bis = document.getElementById('et_bis_'+id).value;
+  const ueberMitternacht = document.getElementById('et_mitternacht_'+id).checked;
+  if(!name||!von||!bis){ toast('Bitte Tätigkeit, Von und Bis ausfüllen'); return; }
+  if(!ueberMitternacht && toMin(bis)<=toMin(von)){ toast('Ende muss nach Beginn liegen (oder „über Mitternacht" aktivieren)'); return; }
+  const bedarf = {}; const alle = [];
+  STAMM.vereine.forEach(v=>{
+    const alleChecked = document.getElementById('et_alle_'+id+'_'+v.id)?.checked;
+    if(alleChecked){ alle.push(v.id); return; }
+    const val = parseInt(document.getElementById('et_bedarf_'+id+'_'+v.id).value)||0;
+    if(val>0) bedarf[v.id]=val;
+  });
+  tk.bereichId = bereichId; tk.name = name; tk.von = von; tk.bis = bis; tk.ueberMitternacht = ueberMitternacht;
+  tk.bedarf = bedarf; tk.alle = alle;
+  EDITING_TAETIGKEIT = null;
+  applyStammChange();
+  toast('Tätigkeit aktualisiert');
+}
+function editFixePersonen(tk){
+  STAMM.vereine.forEach(v=>{
+    if(!((tk.bedarf&&tk.bedarf[v.id])>0)) return;
+    const eligibleNames = STAMM.mitglieder.filter(m=>m.vereinId===v.id).map(m=>m.name).join(', ');
+    const currentNames = (tk.fixe||[]).filter(f=>f.vereinId===v.id).map(f=>mitglied(f.mitgliedId)?.name).filter(Boolean).join(', ');
+    const input = prompt('Fixe Personen für '+v.name+' (kommagetrennt, verfügbar: '+eligibleNames+')', currentNames);
+    if(input===null) return;
+    const names = input.split(',').map(s=>s.trim()).filter(Boolean);
+    const ids = names.map(n=> STAMM.mitglieder.find(m=>m.vereinId===v.id && m.name.toLowerCase()===n.toLowerCase())?.id).filter(Boolean);
+    tk.fixe = (tk.fixe||[]).filter(f=>f.vereinId!==v.id);
+    ids.forEach(mid=> tk.fixe.push({vereinId:v.id, mitgliedId:mid}));
+  });
 }
 
 function renderNewTaetigkeitForm(terminId){
@@ -932,50 +1104,6 @@ function addTaetigkeit(terminId){
 function delTaetigkeit(id){ if(!confirm('Tätigkeit wirklich löschen? Alle zugehörigen Einsätze werden entfernt.')) return;
   STAMM.taetigkeiten = STAMM.taetigkeiten.filter(t=>t.id!==id); applyStammChange(); }
 
-function editTaetigkeit(id){
-  const tk = taetigkeit(id); if(!tk) return;
-  const name = prompt('Bezeichnung der Tätigkeit:', tk.name); if(name===null) return;
-  const von = prompt('Beginn (HH:MM):', tk.von); if(von===null) return;
-  const bis = prompt('Ende (HH:MM):', tk.bis); if(bis===null) return;
-  const mnInput = prompt('Geht der Einsatz über Mitternacht (endet am Folgetag)? (ja/nein)', tk.ueberMitternacht?'ja':'nein');
-  if(mnInput===null) return;
-  const ueberMitternacht = /^j/i.test(mnInput.trim());
-  if(!ueberMitternacht && toMin(bis)<=toMin(von)){ toast('Ende muss nach Beginn liegen (oder über Mitternacht angeben)'); return; }
-  tk.name = name.trim()||tk.name; tk.von=von; tk.bis=bis; tk.ueberMitternacht=ueberMitternacht;
-  if(!tk.alle) tk.alle=[];
-  STAMM.vereine.forEach(v=>{
-    const istAlleAktuell = tk.alle.includes(v.id);
-    const alleInput = prompt('Sollen ALLE aktuellen Mitglieder von "'+v.name+'" automatisch für diese Tätigkeit eingeteilt werden (obligatorisch)? (ja/nein)', istAlleAktuell?'ja':'nein');
-    if(alleInput===null) return;
-    const alle = /^j/i.test(alleInput.trim());
-    tk.alle = tk.alle.filter(vid=>vid!==v.id);
-    if(alle){
-      tk.alle.push(v.id);
-      if(tk.bedarf) delete tk.bedarf[v.id];
-    } else {
-      const cur = (tk.bedarf&&tk.bedarf[v.id])||0;
-      const val = prompt('Benötigte Anzahl '+v.name+':', cur);
-      if(val!==null){ const n=parseInt(val)||0; if(!tk.bedarf) tk.bedarf={}; if(n>0) tk.bedarf[v.id]=n; else delete tk.bedarf[v.id]; }
-    }
-  });
-  if(confirm('Fixe Personen für diese Tätigkeit festlegen/ändern?')){
-    editFixePersonen(tk);
-  }
-  applyStammChange();
-}
-function editFixePersonen(tk){
-  STAMM.vereine.forEach(v=>{
-    if(!((tk.bedarf&&tk.bedarf[v.id])>0)) return;
-    const eligibleNames = STAMM.mitglieder.filter(m=>m.vereinId===v.id).map(m=>m.name).join(', ');
-    const currentNames = (tk.fixe||[]).filter(f=>f.vereinId===v.id).map(f=>mitglied(f.mitgliedId)?.name).filter(Boolean).join(', ');
-    const input = prompt('Fixe Personen für '+v.name+' (kommagetrennt, verfügbar: '+eligibleNames+')', currentNames);
-    if(input===null) return;
-    const names = input.split(',').map(s=>s.trim()).filter(Boolean);
-    const ids = names.map(n=> STAMM.mitglieder.find(m=>m.vereinId===v.id && m.name.toLowerCase()===n.toLowerCase())?.id).filter(Boolean);
-    tk.fixe = (tk.fixe||[]).filter(f=>f.vereinId!==v.id);
-    ids.forEach(mid=> tk.fixe.push({vereinId:v.id, mitgliedId:mid}));
-  });
-}
 function addDienstleisterEinsatz(terminId){
   const dienstleisterId = document.getElementById('dl_anbieter_'+terminId).value;
   const von = document.getElementById('dl_von_'+terminId).value;
